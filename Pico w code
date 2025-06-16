@@ -1,0 +1,181 @@
+import machine
+import time
+import network
+from blynklib import Blynk
+from machine import Pin, ADC, UART
+import utime
+
+# Thresholds and delay
+NITROGEN_THRESHOLD = 215    
+POTASSIUM_THRESHOLD = 50   
+PHOSPHORUS_THRESHOLD = 50
+
+# Wi-Fi and Blynk Setup
+BLYNK_TEMPLATE_ID = "TMPL3qnnhBiuf"
+BLYNK_TEMPLATE_NAME = "soil moisture"
+BLYNK_AUTH_TOKEN = "vkLmOhp0vLR1rdMGnyNgSVOy7J2sNJZw"
+WIFI_SSID = "Hi"
+WIFI_PASSWORD = "12345678"
+
+VIRTUAL_PIN_GAUGE = 0
+VPIN_N = 1
+VPIN_P = 2
+VPIN_K = 3
+
+# Relay and Sensor Pin Definitions
+relay_water = Pin(7, Pin.OUT, value=1)
+relay_N = Pin(8, Pin.OUT, value=1)
+relay_potas = Pin(2, Pin.OUT, value=1)
+relay_phos = Pin(3, Pin.OUT, value=1)
+relay_motor = Pin(6, Pin.OUT, value=1)
+relay_out = Pin(9, Pin.OUT, value=1)
+
+sm_sensor = ADC(Pin(26))
+
+# UART setup (TX: GP4, RX: GP5)
+uart1 = UART(1, baudrate=9600, tx=Pin(4), rx=Pin(5))
+
+# Wi-Fi Initialization
+wifi = network.WLAN(network.STA_IF)
+wifi.active(True)
+wifi.connect(WIFI_SSID, WIFI_PASSWORD)
+
+while not wifi.isconnected():
+    print("Connecting to Wi-Fi...")
+    time.sleep(1)
+
+print("Wi-Fi connected:", wifi.ifconfig())
+
+try:
+    blynk = Blynk(BLYNK_AUTH_TOKEN)
+    print("Blynk connected")
+except Exception as e:
+    print("Blynk connection error:", e)
+    blynk = None
+
+# Moisture Calibration
+min_moisture = 19200
+max_moisture = 50000
+
+# Global variables for sensor values
+nitrogen, phosphorus, potassium = None, None, None
+
+def read_serial():
+    global nitrogen, phosphorus, potassium
+    while uart1.any():  # Read all available data
+        data = uart1.readline()
+        if data:
+            try:
+                decoded_data = data.decode('utf-8').strip()
+                print("Received:", decoded_data)
+
+                parts = decoded_data.replace(" ", "").split(",")
+                npk_values = {k: int(v) for k, v in (part.split(":") for part in parts if ":" in part)}
+
+                nitrogen = npk_values.get('N', nitrogen)
+                phosphorus = npk_values.get('P', phosphorus)
+                potassium = npk_values.get('K', potassium)
+
+                if blynk:
+                    blynk.virtual_write(VPIN_N, nitrogen or 0)
+                    blynk.virtual_write(VPIN_P, phosphorus or 0)
+                    blynk.virtual_write(VPIN_K, potassium or 0)
+            except Exception as e:
+                print("Error decoding received data:", e)
+
+def activate_relay_sequence():
+    global nitrogen, phosphorus, potassium
+
+    if nitrogen is not None and nitrogen < NITROGEN_THRESHOLD:
+        relay_water.value(0)
+        for _ in range(15):
+            read_serial()
+            time.sleep(1)
+        relay_water.value(1)
+        time.sleep(3)
+        relay_N.value(0)
+        time.sleep(1)
+        relay_N.value(1)
+        time.sleep(2)
+        relay_motor.value(0)
+        time.sleep(4)
+        relay_motor.value(1)
+        time.sleep(2)
+        relay_out.value(0)
+        time.sleep(8)
+        relay_out.value(1)
+        time.sleep(2)
+        print("Nitrogen condition executed, adding delay...")
+        time.sleep(15)  # Delay after executio
+        return  
+
+    if potassium is not None and potassium < POTASSIUM_THRESHOLD:
+        relay_water.value(0)
+        for _ in range(15):
+            read_serial()
+            time.sleep(1)
+        relay_water.value(1)
+        time.sleep(3)
+        relay_potas.value(0)
+        time.sleep(1)
+        relay_potas.value(1)
+        time.sleep(2)
+        relay_motor.value(0)
+        time.sleep(4)
+        relay_motor.value(1)
+        time.sleep(2)
+        relay_out.value(0)
+        time.sleep(8)
+        relay_out.value(1)
+        time.sleep(2)
+        print("Potassium condition executed, adding delay...")
+        time.sleep(10)  # Delay after executio
+        return  
+
+    if phosphorus is not None and phosphorus < PHOSPHORUS_THRESHOLD:
+        relay_water.value(0)
+        for _ in range(15):
+            read_serial()
+            time.sleep(1)
+        relay_water.value(1)
+        time.sleep(3)
+        relay_phos.value(0)
+        time.sleep(1)
+        relay_phos.value(1)
+        time.sleep(2)
+        relay_motor.value(0)
+        time.sleep(4)
+        relay_motor.value(1)
+        time.sleep(2)
+        relay_out.value(0)
+        time.sleep(8)
+        relay_out.value(1)
+        time.sleep(2)
+        print("Phosphorus condition executed, adding delay...")
+        time.sleep(10)  # Delay after execution
+        return  
+
+while True:
+    try:
+        read_serial()
+        raw_value = sm_sensor.read_u16()
+        moisture = (max_moisture - raw_value) * 100 / (max_moisture - min_moisture)
+        moisture = max(0, min(100, moisture))
+        print(f"Moisture: {moisture:.2f}% (ADC: {raw_value})")
+
+        if raw_value > 50000:
+            relay_water.value(0)
+        elif raw_value < 35000:
+            relay_water.value(1)
+
+        activate_relay_sequence()
+
+        if blynk:
+            blynk.virtual_write(VIRTUAL_PIN_GAUGE, moisture)
+            blynk.run()
+
+        time.sleep(0.5)  # Reduced delay for faster readings
+    except Exception as e:
+        print("Error in main loop:", e)
+        time.sleep(1)
+
